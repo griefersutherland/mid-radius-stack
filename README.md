@@ -2,6 +2,18 @@
 
 > **Note:** This project is written by Claude (Anthropic) and is still a work in progress. Review it accordingly before relying on it.
 
+## Thanks
+
+All the actual heavy lifting here is done by other people's work, not this
+repo. Special thanks to the [FreeRADIUS](https://freeradius.org/) project
+and its maintainers — the entire EAP-TLS/RadSec/PAP protocol engine this
+stack configures is theirs, and none of this would exist without decades of
+their work on it. Thanks also to the [Docker](https://www.docker.com/) and
+[step-cli](https://smallstep.com/docs/step-cli/)/[step-ca](https://smallstep.com/docs/step-ca/)
+maintainers, and to everyone behind the open-source libraries this stack
+quietly depends on. This repo is just glue and configuration around their
+real work.
+
 A docker-compose stack wiring together EAP-TLS FreeRADIUS with a Microsoft
 Intune/Entra device-compliance gate, backed by Postgres + Redis caching.
 
