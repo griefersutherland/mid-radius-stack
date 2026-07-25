@@ -1,5 +1,5 @@
 #!/bin/sh
-# intune-radius-stack - fills random values for locally-generated .env secrets
+# mid-radius-stack - fills random values for locally-generated .env secrets
 # Copyright (C) 2026  griefersutherland
 #
 # This program is free software: you can redistribute it and/or modify

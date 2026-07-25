@@ -1,4 +1,4 @@
-# intune-radius-stack
+# mid-radius-stack
 
 > **Note:** This project is written by Claude (Anthropic) and is still a work in progress. Review it accordingly before relying on it.
 
@@ -74,7 +74,7 @@ is populated (`root_ca.crt`, `intermediate_ca.crt`, `intermediate_ca.key`,
 
 ```bash
 cat pimptune-stack/info/intermediate_ca.crt pimptune-stack/info/root_ca.crt \
-  > intune-radius-stack/certs/ca-chain.pem
+  > mid-radius-stack/certs/ca-chain.pem
 ```
 
 `EXPECTED_ISSUER_CN` in `.env` must match the intermediate's CN — check with
@@ -89,16 +89,16 @@ pimptune-stack's own README mints its SCEP RA cert:
 ```bash
 cd pimptune-stack
 step certificate create "radius.yourdomain.internal" \
-  ../intune-radius-stack/certs/radius-server.crt \
-  ../intune-radius-stack/certs/radius-server.key \
+  ../mid-radius-stack/certs/radius-server.crt \
+  ../mid-radius-stack/certs/radius-server.key \
   --profile leaf --kty RSA --size 2048 \
   --ca ./info/intermediate_ca.crt --ca-key ./info/intermediate_ca.key \
   --ca-password-file ./info/intermediate_ca.txt \
   --san radius.yourdomain.internal \
   --not-after 8760h --no-password --insecure
 
-cat intune-radius-stack/certs/radius-server.crt ./info/intermediate_ca.crt \
-  > ../intune-radius-stack/certs/radius-server-chain.pem
+cat mid-radius-stack/certs/radius-server.crt ./info/intermediate_ca.crt \
+  > ../mid-radius-stack/certs/radius-server-chain.pem
 ```
 
 (`--no-password --insecure` leaves the key unencrypted on disk, matching
