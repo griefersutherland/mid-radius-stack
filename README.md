@@ -14,17 +14,17 @@ maintainers, and to everyone behind the open-source libraries this stack
 quietly depends on. This repo is just glue and configuration around their
 real work.
 
-A docker-compose stack wiring together EAP-TLS FreeRADIUS with a Microsoft
-Intune/Entra device-compliance gate, backed by Postgres + Redis caching.
+A docker-compose stack wiring together EAP-TLS FreeRADIUS with a
+certificate-identity compliance gate, backed by Postgres + Redis caching.
 
 - **freeradius** — the stock [`freeradius/freeradius-server`](https://hub.docker.com/r/freeradius/freeradius-server) image, unmodified. `scripts/start-radius.sh` and `scripts/verify-client-cert.sh` (GPLv3, in this repo) are bind-mounted in and installed as the container's entrypoint — no custom image to build or publish.
-- [intune-radius-helper](https://github.com/griefersutherland/intune-radius-helper) — pre-built image; FastAPI service that checks client cert identity against Intune/Entra via Microsoft Graph
+- [intune-radius-helper](https://github.com/griefersutherland/intune-radius-helper) — pre-built image; FastAPI service that checks client cert identity against Intune/Entra (via Microsoft Graph) and/or on-prem AD (via LDAPS), depending on how you configure it — see "Authentication configuration" below.
 
 FreeRADIUS calls the helper over HTTP (`http://intune-radius-helper:8080/check`)
 after the TLS handshake completes, from the RADIUS `post-auth` phase; the
 helper looks up the device/user identity embedded in the cert's SAN URIs
-against Microsoft Graph (cached in Postgres, hot-cached in Redis) and
-returns an `access`/`untrust`/`reject` tier.
+against whichever backend(s) you've enabled (cached in Postgres, hot-cached
+in Redis) and returns an `access`/`untrust`/`reject` tier.
 
 `start-radius.sh` generates FreeRADIUS's `clients.conf`, EAP-TLS config, and
 site config from env vars at container start. The cert check is split across
@@ -51,13 +51,168 @@ package mirrors. If that's undesirable (offline hosts, faster restarts),
 build your own image from this repo's `scripts/` instead and point
 `docker-compose.yaml` at it.
 
-## Prerequisites
+## Choose your setup
 
-You need your own PKI already set up, plus a Microsoft Entra ID app
-registration. This stack doesn't issue certificates or provision that app
-for you — see the two sections below for both.
+Two independent decisions, each covered in its own section below — mix and
+match freely:
+
+| Certificates come from... | Go to |
+|---|---|
+| An existing ADCS PKI you already run | [PKI setup → Path A](#path-a-bring-your-own-adcs-pki) |
+| No PKI yet, and you're on Intune | [PKI setup → Path B (pimptune-stack)](#path-b-no-pki-yet-pimptune-stack) |
+
+| Devices should be gated on... | Go to |
+|---|---|
+| On-prem AD/LDAP only — no Intune/Entra tenant involved | [Authentication → Path A](#path-a-adldap-only-no-intuneentra) |
+| Live Intune device compliance + Entra account status | [Authentication → Path B](#path-b-intuneentra-device-compliance) |
+| Either of the above, *plus* username/password guests | [Authentication → Path C](#path-c-add-guest-wi-fi-pap-against-ad) |
+
+Every combination of one PKI path + one auth path (plus optionally guest
+Wi-Fi on top) is a supported configuration — they don't constrain each
+other. This stack never issues certificates or provisions an Entra app
+registration for you; both PKI paths below produce the same three files
+(`certs/ca-chain.pem`, `certs/radius-server.key`, `certs/radius-server-chain.pem`)
+that everything past this point relies on.
 
 ## PKI setup
+
+### Certificate requirements
+
+Regardless of which PKI path you use, mid-radius-stack expects:
+
+- **RADIUS server cert** (`certs/radius-server-chain.pem` + `certs/radius-server.key`):
+  `TLS Web Server Authentication` EKU, SAN matching your RADIUS hostname,
+  chaining to `certs/ca-chain.pem`.
+- **Device/user client certs**: `TLS Web Client Authentication` EKU,
+  chaining to the same `certs/ca-chain.pem`, plus a SAN **URI** entry
+  identifying the device/user. *Which* URI(s) you need depends on the
+  Authentication path you pick below:
+
+  | Type | Value | Needed for |
+  |---|---|---|
+  | URI | `urn:example.com:entra-device-id:{{AAD_Device_ID}}` | Authentication → Path B (Intune/Entra) |
+  | URI | `urn:example.com:user-upn:{{UPN}}` | Authentication → Path B, user (not device) certs |
+  | URI | `urn:example.com:onprem-sid:{{OnPremisesSecurityIdentifier}}` | Authentication → Path A (AD/LDAP-only); optional secondary check under Path B |
+
+  (swap `urn:example.com` for your actual `URN_PREFIX`.) If certs are
+  issued through Intune SCEP, all of these are added the same way — in the
+  SCEP profile's **Subject Alternative Name** section — regardless of which
+  CA backs NDES underneath it; add only the row(s) your chosen
+  Authentication path needs.
+
+- **`EXPECTED_ISSUER_CN`** in `.env` must match the exact CN of whichever CA
+  *directly* signs your device/RADIUS certs — in a multi-tier hierarchy,
+  that's the issuing/subordinate CA, not an offline root.
+
+### Path A: Bring your own ADCS PKI
+
+If you already run Active Directory Certificate Services, you don't need
+pimptune-stack — mid-radius-stack only needs the CA trust chain, a RADIUS
+server certificate, and for whatever issues your device certs (Intune SCEP
+via NDES, a certificate template, etc.) to embed the SAN URIs above.
+
+#### 1. Export the CA chain
+
+Easiest via the CA's web enrollment page (enable the "Certification
+Authority Web Enrollment" role service if it isn't already), which offers a
+ready-made chain download:
+
+```
+https://<ca-server>/certsrv/certcarc.asp
+```
+
+Download the **CA certificate chain**, then convert the resulting `.p7b` to
+the PEM bundle mid-radius-stack expects:
+
+```bash
+openssl pkcs7 -print_certs -in ca-chain.p7b -out mid-radius-stack/certs/ca-chain.pem
+```
+
+No web enrollment role available? Export each cert in the chain manually
+instead: open the **Certification Authority** MMC snap-in → right-click
+your CA → **Properties** → **General** tab → **View Certificate** →
+**Certification Path** tab → select each certificate up the chain →
+**Details** → **Copy to File** (Base-64 encoded X.509, one file per cert),
+then concatenate them in root-last order:
+
+```bash
+cat intermediate.pem root.pem > mid-radius-stack/certs/ca-chain.pem
+```
+
+#### 2. Request the RADIUS server certificate
+
+Needs `Server Authentication` EKU and a SAN matching your RADIUS hostname.
+Via `certreq` on Windows (swap `CertificateTemplate` for whatever your CA
+has configured for TLS server certs, e.g. `WebServer`):
+
+`radius-cert.inf`:
+```ini
+[Version]
+Signature="$Windows NT$"
+
+[NewRequest]
+Subject = "CN=radius.yourdomain.internal"
+KeySpec = 1
+KeyLength = 2048
+MachineKeySet = TRUE
+Exportable = TRUE
+ProviderName = "Microsoft RSA SChannel Cryptographic Provider"
+ProviderType = 12
+RequestType = PKCS10
+
+[EnhancedKeyUsageExtension]
+OID = 1.3.6.1.5.5.7.3.1 ; Server Authentication
+
+[Extensions]
+2.5.29.17 = "{text}"
+_continue_ = "dns=radius.yourdomain.internal&"
+```
+
+```powershell
+certreq -new radius-cert.inf radius-cert.req
+certreq -submit -attrib "CertificateTemplate:WebServer" radius-cert.req radius-cert.cer
+certreq -accept radius-cert.cer
+```
+
+`certreq -accept` installs the cert (with its matching private key) into the
+local machine store rather than handing you files directly — export it as a
+password-protected `.pfx` from **certlm.msc** (Personal → Certificates →
+right-click the cert → All Tasks → Export, include the private key), then
+split it into the PEM files mid-radius-stack expects:
+
+```bash
+openssl pkcs12 -in radius-cert.pfx -clcerts -nokeys -out mid-radius-stack/certs/radius-server.crt
+openssl pkcs12 -in radius-cert.pfx -nocerts -nodes -out mid-radius-stack/certs/radius-server.key
+cat mid-radius-stack/certs/radius-server.crt mid-radius-stack/certs/ca-chain.pem \
+  > mid-radius-stack/certs/radius-server-chain.pem
+```
+
+#### 3. Client (device/user) certs
+
+If device certs already come through Intune SCEP with NDES backed by this
+CA, configuring the SAN URIs is identical to any other CA — see
+"Certificate requirements" above — then assign the profile as usual; no
+further ADCS-specific configuration is needed beyond the CA chain and
+issuer CN above.
+
+Issuing straight from a certificate template instead (no Intune/SCEP)? A
+template can't hardcode a per-device URN, so it needs to allow the
+**requester to supply the Subject Alternative Name**. On the CA:
+
+```powershell
+certutil -setreg policy\EditFlags +EDITF_ATTRIBSUBJECTALTNAME2
+net stop certsvc
+net start certsvc
+```
+
+then supply the SAN as a request attribute at submission time (`certreq
+-submit -attrib "SAN:URL=urn:example.com:onprem-sid:S-1-5-21-..."`, or the
+equivalent `-attrib` line alongside `CertificateTemplate` above). This is a
+real CA policy change — letting requesters set arbitrary SAN values is
+worth reviewing with your PKI team before enabling broadly, and is really
+only meant for one-off/manual/testing certs, not routine issuance.
+
+### Path B: No PKI yet (pimptune-stack)
 
 If you don't already have a CA, use
 [pimptune-stack](https://github.com/griefersutherland/pimptune-stack) — it
@@ -70,7 +225,7 @@ beyond a POC). Everything below assumes it's up and its `./info/` directory
 is populated (`root_ca.crt`, `intermediate_ca.crt`, `intermediate_ca.key`,
 `intermediate_ca.txt`).
 
-### 1. Copy the CA chain
+#### 1. Copy the CA chain
 
 ```bash
 cat pimptune-stack/info/intermediate_ca.crt pimptune-stack/info/root_ca.crt \
@@ -80,7 +235,7 @@ cat pimptune-stack/info/intermediate_ca.crt pimptune-stack/info/root_ca.crt \
 `EXPECTED_ISSUER_CN` in `.env` must match the intermediate's CN — check with
 `step certificate inspect pimptune-stack/info/intermediate_ca.crt | grep Subject:`.
 
-### 2. Request the FreeRADIUS server certificate
+#### 2. Request the FreeRADIUS server certificate
 
 FreeRADIUS's own TLS identity isn't something SCEP/Intune issues — it's a
 server cert you request directly from the intermediate, the same way
@@ -105,44 +260,20 @@ cat mid-radius-stack/certs/radius-server.crt ./info/intermediate_ca.crt \
 what `start-radius.sh` expects — it doesn't prompt for a private key
 password. Keep the file permissions tight instead.)
 
-### 3. Client certs (device/user) via Intune SCEP
+#### 3. Client certs (device/user) via Intune SCEP
 
 Once pimptune-stack's Intune configuration profiles are assigned (its
 README walks through the Trusted Certificate + SCEP profiles), devices
-enroll automatically. The one thing to add on top of pimptune-stack's own
-instructions: in the SCEP profile's **Subject Alternative Name** section,
-add a **URI** entry so `verify-client-cert.sh` has something to check:
+enroll automatically. On top of pimptune-stack's own instructions, add the
+SAN URI row(s) your chosen Authentication path needs — see "Certificate
+requirements" above. This is independent of pimptune's own optional
+CN-based compliance check; our helper reads identity from these SAN URIs,
+not the Subject CN.
 
-| Type | Value |
-|---|---|
-| URI | `urn:example.com:entra-device-id:{{AAD_Device_ID}}` |
-
-— using your actual `URN_PREFIX` in place of `urn:example.com`. This is
-independent of pimptune's own optional CN-based compliance check; our
-helper reads identity from this SAN URI, not the Subject CN.
-
-If you also want the helper's optional AD/LDAP device lookup
-(`AD_LDAP_ENABLED`, see `.env.example`), add a second URI entry in the same
-section:
-
-| Type | Value |
-|---|---|
-| URI | `urn:example.com:onprem-sid:{{OnPremisesSecurityIdentifier}}` |
-
-This is Intune's strong-certificate-mapping SID variable for hybrid-joined
-devices - it resolves to nothing (and the URI is simply absent from the
-issued cert) for devices with no on-prem AD counterpart.
-
-The helper also supports an independent device-blocking denylist
-(`ADMIN_API_KEY`, see `.env.example`) for cutting off a stolen/terminated
-device immediately, ahead of any compliance check - see
-intune-radius-helper's README "Device blocking" section for the
-`/block-device`/`/unblock-device`/`/blocked-devices` API.
-
-### 4. Requesting a one-off client cert manually (no Intune)
+#### 4. Requesting a one-off client cert manually (no Intune)
 
 For testing, or non-Intune clients, mint one directly the same way as the
-server cert, adding the SAN URI by hand:
+server cert, adding the SAN URI(s) by hand:
 
 ```bash
 step certificate create "test-device" test-device.crt test-device.key \
@@ -161,11 +292,52 @@ Authentication`, you'll need a [custom step-ca
 template](https://smallstep.com/docs/step-ca/templates/) rather than a CLI
 flag to force it.
 
-## Microsoft Entra ID app registration
+## Authentication configuration
 
-`intune-radius-helper` needs its own app registration (separate from
-pimptune's, if you're also using pimptune-stack — different app, different
-permissions):
+Independent of which PKI path you used above — pick how
+`intune-radius-helper` decides `access`/`untrust`/`reject` for a presented
+cert. Paths A and B are mutually exclusive (toggled by `GRAPH_ENABLED`);
+Path C (guest Wi-Fi) is additive and works alongside either.
+
+### Path A: AD/LDAP only (no Intune/Entra)
+
+For deployments with no Intune/Entra tenant involved at all — device certs
+are checked against on-prem Active Directory over LDAPS only, keyed off the
+cert's `onprem-sid` SAN URI (from "Certificate requirements" above).
+
+```
+GRAPH_ENABLED=false
+AD_LDAP_ENABLED=true
+AD_LDAP_SERVER=your-dc.example.com
+AD_LDAP_BASE_DN=DC=example,DC=com
+AD_LDAP_BIND_USERNAME=svc-radius@example.com
+AD_LDAP_BIND_PASSWORD=...
+```
+
+`TENANT_ID`/`CLIENT_ID`/`CLIENT_SECRET` can stay blank — no Entra app
+registration needed, and Graph is never called (see
+[intune-radius-helper's README](https://github.com/griefersutherland/intune-radius-helper#ad-only-mode-no-graph-app-registration)
+"AD-only mode" section for exactly what this disables).
+
+**A custom policy is required** — the built-in default ruleset only
+understands Intune/Entra facts and fails closed (rejects everything)
+without one:
+
+```bash
+mkdir -p config
+curl -o config/policy.json \
+  https://raw.githubusercontent.com/griefersutherland/intune-radius-helper/main/policy.ad-only.example.json
+```
+
+Edit it to taste; as shipped it grants `access` when `ad_device_found` and
+`ad_device_enabled` are both true, and rejects otherwise.
+
+### Path B: Intune/Entra device compliance
+
+The default mode — checks cert identity against live Intune device
+compliance + Entra account status via Microsoft Graph. Needs its own Entra
+ID app registration (separate from pimptune's, if you're also using
+pimptune-stack for PKI — different app, different permissions):
 
 1. **Azure Portal → Microsoft Entra ID → App registrations → New registration.**
    Name it (e.g. `intune-radius-helper`), leave account type as the
@@ -186,6 +358,147 @@ permissions):
    Administrator or Privileged Role Administrator). Permissions won't take
    effect without this step, regardless of what's listed.
 
+```
+GRAPH_ENABLED=true   # default, can be omitted
+TENANT_ID=...
+CLIENT_ID=...
+CLIENT_SECRET=...
+```
+
+Optional: copy the default ruleset locally to customize it instead of
+relying on the built-in one:
+
+```bash
+mkdir -p config
+curl -o config/policy.json \
+  https://raw.githubusercontent.com/griefersutherland/intune-radius-helper/main/policy.example.json
+```
+
+**Optional: layer on-prem AD as an *additional* check** (not a replacement
+— that's Path A) by also setting `AD_LDAP_ENABLED=true` plus the
+`AD_LDAP_*` vars above and adding the `onprem-sid` SAN URI too. This
+populates `ad_device_found`/`ad_device_enabled` alongside the Intune/Entra
+facts, but **changes no decision by itself** — you have to reference those
+fields in a custom `policy.json` rule (e.g. reject if `ad_device_enabled`
+is `false`) for it to matter. See intune-radius-helper's README "On-prem AD
+device lookup" section for the full fact reference and an example rule, and
+its `/debug/ad-device` endpoint for testing LDAP connectivity in isolation.
+
+**Device blocking**: independent of either compliance check above, an
+explicit denylist (`ADMIN_API_KEY`, see `.env.example`) lets you cut off a
+stolen/terminated device immediately — see intune-radius-helper's README
+"Device blocking" section for the `/block-device`/`/unblock-device`/
+`/blocked-devices` API. Works the same regardless of which Authentication
+path (A or B) you're on.
+
+### Path C: Add guest Wi-Fi (PAP against AD)
+
+Works alongside either Path A or Path B above. For guests authenticating
+with a username/password instead of a device cert - completely separate
+from, and additive to, whichever of Path A/B you chose. Enable with:
+
+```
+PAP_ENABLED=true
+PAP_LDAP_SERVER=your-dc.example.com
+PAP_LDAP_BASE_DN=OU=users,DC=example,DC=com
+PAP_LDAP_BIND_USERNAME=svc-radius@example.com
+PAP_LDAP_BIND_PASSWORD=...
+PAP_LDAP_GROUP_DN=CN=WifiGuests,OU=Groups,DC=example,DC=com
+
+VLAN_PAP_WIFI_BOSTON=50   # per-site, same pattern as VLAN_ACCESS_WIFI_<SITE>
+```
+
+**Reading/finding a DN:** a distinguished name is read right-to-left - each
+`DC=` is a level of your domain name (`foo.bar` becomes `DC=foo,DC=bar`),
+each `OU=` is one level of organizational unit nesting (outermost last), and
+the leftmost component (`CN=` for a user or group, sometimes `OU=` for a
+container) is the object itself. A user or group nested several OUs deep
+looks like this - note the OUs read from innermost to outermost:
+
+```
+PAP_LDAP_BASE_DN=OU=users,OU=foo.bar,DC=foo,DC=bar
+PAP_LDAP_GROUP_DN=CN=WiFi Users,OU=security,OU=groups,OU=foo.bar,DC=foo,DC=bar
+```
+
+(a group named "WiFi Users" inside `groups/security`, inside a `foo.bar`
+OU, in the `foo.bar` domain.) `PAP_LDAP_BASE_DN` only needs to be high
+enough in the tree to contain every user who might authenticate - it doesn't
+need to be the exact OU a given user lives in, since the search filter
+finds them by `sAMAccountName` underneath it.
+
+The easiest way to get the exact value for your environment: in **Active
+Directory Users and Computers**, enable **View → Advanced Features**, then
+right-click the user/group → **Properties → Attribute Editor** tab →
+`distinguishedName`. Or from PowerShell:
+`Get-ADUser <username> -Properties DistinguishedName` /
+`Get-ADGroup <groupname> -Properties DistinguishedName`.
+
+**Why this is deliberately separate from Path A/B above:** guests have no
+certificate and no device identity, so there's nothing for
+`intune-radius-helper` to check - a guest request never calls
+`check-policy.sh` or the helper at all. It's routed entirely by EAP type: in
+`post-auth`, `if (&EAP-Type == TTLS)` sends the request straight to a
+per-site guest VLAN (or rejects, if that site has no `VLAN_PAP_WIFI_<SITE>`
+configured), bypassing the compliance switch entirely - which is also why
+it works unmodified regardless of whether you're on Authentication Path A
+or Path B.
+
+**Why PAP specifically, not MSCHAPv2:** this is not a preference, it's a
+hard constraint. Validating a password against AD from FreeRADIUS requires
+an LDAP "bind as user" - attempting the bind with the username and password
+exactly as the user supplied them. That only works if FreeRADIUS actually
+has the plaintext password, which only PAP (or EAP-TTLS with a PAP inner
+method) provides - MSCHAPv2 only ever hands FreeRADIUS a challenge-response,
+never the password itself, so there's nothing to bind with. (The
+alternative for MSCHAPv2 against AD is `ntlm_auth`/winbind, which requires
+actually domain-joining the container - real persistent state, an ongoing
+machine-account trust to maintain, and DNS/Kerberos/SMB connectivity to a
+DC. Given this is only for guest Wi-Fi, that's a lot of infrastructure for
+what PAP against AD gets you for free.)
+
+Since the client doesn't present a certificate, this uses **EAP-TTLS**, not
+EAP-TLS - the server still proves its own identity via the same cert already
+used for EAP-TLS/RadSec, but the client only has to trust that cert, not
+present one back. **Platform note:** TTLS is natively supported on macOS,
+iOS, Android, Linux, and ChromeOS - Windows is the one notable gap, with no
+built-in EAP-TTLS support in its native 802.1X stack. If a meaningful
+fraction of your guests are on Windows, factor that in.
+
+**Group-restricted, not open to every AD account.** Only members of
+`PAP_LDAP_GROUP_DN` get through - anyone else with otherwise-valid AD
+credentials is rejected, checked fresh on every request (not cached), so
+removing someone from the group cuts off their access on their next
+connection attempt, not after some cache TTL expires.
+
+**Delegation:** `PAP_LDAP_BIND_USERNAME`/`PAP_LDAP_BIND_PASSWORD` only need
+plain Domain Users membership - enough to bind and search. No elevated,
+delegated, or write permissions of any kind.
+
+Verified against a real container (OpenLDAP standing in for AD): an LDAP
+bind succeeds only with the exact correct password, group membership is
+independently enforced (a correct password for a non-member still rejects),
+and the real generated `sAMAccountName=` search filter executes correctly
+against a live LDAP server.
+
+**`PAP_LDAP_VERIFY_CERT=true` needs your AD's own CA trusted, which this
+stack doesn't currently have a way to supply.** There's no `ca_file`/`ca_path`
+equivalent wired up for this connection - your AD's PKI (whatever issues your
+DC's LDAPS cert) is almost certainly not the same one used for EAP-TLS
+(`certs/ca-chain.pem`), so verification will only succeed if the DC's cert
+chains to something already in the container's default system trust store.
+Otherwise, leave this `false` - the connection is still TLS-encrypted, just
+without authenticating the DC's identity.
+
+**A broken LDAP connection takes down the whole RADIUS server, not just
+guest Wi-Fi.** Found this against production: if the `ldap` module can't
+connect at startup (bad server address, cert verification failure, network
+unreachable), FreeRADIUS treats that as fatal and the *entire* container
+crash-loops - EAP-TLS and RadSec stop working too, not just PAP. If you
+enable `PAP_ENABLED`, actually test the LDAP connection works before
+relying on this in production; if the container is crash-looping, checking
+`docker inspect <container> --format='{{.RestartCount}}'` confirms it (a
+climbing count means it's looping, not just slow to start).
+
 ## Setup
 
 ```
@@ -195,33 +508,34 @@ permissions):
 # defined via NAS_CIDR_<SITE> in .env (--force to regenerate ones that are
 # already set)
 
-# then fill in by hand: TENANT_ID / CLIENT_ID / CLIENT_SECRET (from the app
-# registration above), EXPECTED_ISSUER_CN, URN_PREFIX, and your real sites -
-# NAS_CIDR_<SITE> / VLAN_*_<SITE> (see .env.example) - then re-run
+# then fill in by hand: EXPECTED_ISSUER_CN, URN_PREFIX, your real sites -
+# NAS_CIDR_<SITE> / VLAN_*_<SITE> (see .env.example) - and whichever
+# Authentication path vars you chose above - then re-run
 # generate-secrets.sh to fill in each site's NAS_SECRET_<SITE>
 
 mkdir -p certs logs config
 # place ca-chain.pem, radius-server.key, radius-server-chain.pem from the
-# PKI setup above (and a CRL if ENABLE_CRL_VERIFICATION=true) into ./certs
-
-# optional: copy intune-radius-helper's policy.example.json to
-# ./config/policy.json and edit it to customize access/untrust/reject rules -
-# if you skip this, the helper's built-in default ruleset is used
+# PKI setup above (and a CRL if ENABLE_CRL_VERIFICATION=true) into ./certs,
+# and config/policy.json from the Authentication setup above into ./config
+# if your chosen path needs a custom one
 
 docker compose up -d
 ```
 
 `docker compose logs -f freeradius` and `docker compose logs -f intune-radius-helper`
 are your main debugging entry points; `curl http://localhost:8080/healthz`
-from inside the `intune-radius-helper` container reports cache/backend health.
+from inside the `intune-radius-helper` container reports cache/backend
+health, including which Authentication path is active (`graphEnabled`,
+`adLdapEnabled`).
 
 ### Smoke test before pointing real infra at it
 
-Verify the whole chain — cert parsing, Graph auth, and the policy decision
-— without needing a real 802.1X supplicant. This is now two steps, since the
-cert check is split across two hooks (see above): `verify-client-cert.sh`
-does structural checks and stages the cert, `check-policy.sh` reads that
-staged cert and makes the actual policy call.
+Verify the whole chain — cert parsing, the configured Authentication
+path(s), and the policy decision — without needing a real 802.1X
+supplicant. This is two steps, since the cert check is split across two
+hooks (see above): `verify-client-cert.sh` does structural checks and
+stages the cert, `check-policy.sh` reads that staged cert and makes the
+actual policy call.
 
 ```bash
 # any client cert issued per the PKI setup above works, including a
@@ -242,10 +556,10 @@ docker compose exec freeradius /usr/local/bin/check-policy.sh \
 Exit `0` / `PASS` from `verify-client-cert.sh` means chain verify → issuer
 CN → EKU → SAN URI all passed and the cert was staged successfully.
 `check-policy.sh` should print `access`, `untrust`, or `reject` — a real
-Graph-backed answer (not stuck/empty) confirms the live device lookup and
-policy engine are working end to end. Check
-`docker compose logs intune-radius-helper` for the exact reason behind an
-`untrust`/`reject` result.
+backend-driven answer (not stuck/empty) confirms the live lookup and policy
+engine are working end to end. Check `docker compose logs
+intune-radius-helper` for the exact reason behind an `untrust`/`reject`
+result.
 
 For a fully real end-to-end test (through FreeRADIUS's actual `post-auth`
 `unlang`, not just these two scripts run by hand), use `eapol_test` (from
@@ -345,6 +659,9 @@ step certificate create "radsec-peer" radsec-peer.crt radsec-peer.key \
   --not-after 8760h --no-password --insecure
 ```
 
+(ADCS users: same `certreq` flow as the RADIUS server certificate above,
+minus the SAN URI.)
+
 Give each physical peer/AP its own cert rather than reusing one across
 multiple sites — FreeRADIUS itself doesn't require this (it only checks the
 cert chains to `ca_file`, not which specific cert was presented), but it
@@ -403,111 +720,6 @@ config exposes a **TLS** option):
 Other RadSec-capable NAS/proxy software should expose the same concepts
 (client cert + key, CA cert, port, and the `radsec` secret convention) even
 if the exact field names differ.
-
-### Guest Wi-Fi (EAP-TTLS/PAP against AD)
-
-For guests authenticating with a username/password instead of a device
-cert - completely separate from everything above. Enable with:
-
-```
-PAP_ENABLED=true
-PAP_LDAP_SERVER=your-dc.example.com
-PAP_LDAP_BASE_DN=OU=users,DC=example,DC=com
-PAP_LDAP_BIND_USERNAME=svc-radius@example.com
-PAP_LDAP_BIND_PASSWORD=...
-PAP_LDAP_GROUP_DN=CN=WifiGuests,OU=Groups,DC=example,DC=com
-
-VLAN_PAP_WIFI_BOSTON=50   # per-site, same pattern as VLAN_ACCESS_WIFI_<SITE>
-```
-
-**Reading/finding a DN:** a distinguished name is read right-to-left - each
-`DC=` is a level of your domain name (`foo.bar` becomes `DC=foo,DC=bar`),
-each `OU=` is one level of organizational unit nesting (outermost last), and
-the leftmost component (`CN=` for a user or group, sometimes `OU=` for a
-container) is the object itself. A user or group nested several OUs deep
-looks like this - note the OUs read from innermost to outermost:
-
-```
-PAP_LDAP_BASE_DN=OU=users,OU=foo.bar,DC=foo,DC=bar
-PAP_LDAP_GROUP_DN=CN=WiFi Users,OU=security,OU=groups,OU=foo.bar,DC=foo,DC=bar
-```
-
-(a group named "WiFi Users" inside `groups/security`, inside a `foo.bar`
-OU, in the `foo.bar` domain.) `PAP_LDAP_BASE_DN` only needs to be high
-enough in the tree to contain every user who might authenticate - it doesn't
-need to be the exact OU a given user lives in, since the search filter
-finds them by `sAMAccountName` underneath it.
-
-The easiest way to get the exact value for your environment: in **Active
-Directory Users and Computers**, enable **View → Advanced Features**, then
-right-click the user/group → **Properties → Attribute Editor** tab →
-`distinguishedName`. Or from PowerShell:
-`Get-ADUser <username> -Properties DistinguishedName` /
-`Get-ADGroup <groupname> -Properties DistinguishedName`.
-
-**Why this is deliberately separate from the rest of this stack:** guests
-have no certificate and no Entra device identity, so there's nothing for
-`intune-radius-helper` to check - a guest request never calls
-`check-policy.sh` or the helper at all. It's routed entirely by EAP type: in
-`post-auth`, `if (&EAP-Type == TTLS)` sends the request straight to a
-per-site guest VLAN (or rejects, if that site has no `VLAN_PAP_WIFI_<SITE>`
-configured), bypassing the Intune/Entra compliance switch entirely.
-
-**Why PAP specifically, not MSCHAPv2:** this is not a preference, it's a
-hard constraint. Validating a password against AD from FreeRADIUS requires
-an LDAP "bind as user" - attempting the bind with the username and password
-exactly as the user supplied them. That only works if FreeRADIUS actually
-has the plaintext password, which only PAP (or EAP-TTLS with a PAP inner
-method) provides - MSCHAPv2 only ever hands FreeRADIUS a challenge-response,
-never the password itself, so there's nothing to bind with. (The
-alternative for MSCHAPv2 against AD is `ntlm_auth`/winbind, which requires
-actually domain-joining the container - real persistent state, an ongoing
-machine-account trust to maintain, and DNS/Kerberos/SMB connectivity to a
-DC. Given this is only for guest Wi-Fi, that's a lot of infrastructure for
-what PAP against AD gets you for free.)
-
-Since the client doesn't present a certificate, this uses **EAP-TTLS**, not
-EAP-TLS - the server still proves its own identity via the same cert already
-used for EAP-TLS/RadSec, but the client only has to trust that cert, not
-present one back. **Platform note:** TTLS is natively supported on macOS,
-iOS, Android, Linux, and ChromeOS - Windows is the one notable gap, with no
-built-in EAP-TTLS support in its native 802.1X stack. If a meaningful
-fraction of your guests are on Windows, factor that in.
-
-**Group-restricted, not open to every AD account.** Only members of
-`PAP_LDAP_GROUP_DN` get through - anyone else with otherwise-valid AD
-credentials is rejected, checked fresh on every request (not cached), so
-removing someone from the group cuts off their access on their next
-connection attempt, not after some cache TTL expires.
-
-**Delegation:** `PAP_LDAP_BIND_USERNAME`/`PAP_LDAP_BIND_PASSWORD` only need
-plain Domain Users membership - enough to bind and search. No elevated,
-delegated, or write permissions of any kind.
-
-Verified against a real container (OpenLDAP standing in for AD): an LDAP
-bind succeeds only with the exact correct password, group membership is
-independently enforced (a correct password for a non-member still rejects),
-and the real generated `sAMAccountName=` search filter executes correctly
-against a live LDAP server.
-
-**`PAP_LDAP_VERIFY_CERT=true` needs your AD's own CA trusted, which this
-stack doesn't currently have a way to supply.** There's no `ca_file`/`ca_path`
-equivalent wired up for this connection - your AD's PKI (whatever issues your
-DC's LDAPS cert) is almost certainly not the same one used for EAP-TLS
-(`certs/ca-chain.pem`), so verification will only succeed if the DC's cert
-chains to something already in the container's default system trust store.
-Otherwise, leave this `false` - the connection is still TLS-encrypted, just
-without authenticating the DC's identity.
-
-**A broken LDAP connection takes down the whole RADIUS server, not just
-guest Wi-Fi.** Found this against production: if the `ldap` module can't
-connect at startup (bad server address, cert verification failure, network
-unreachable), FreeRADIUS treats that as fatal and the *entire* container
-crash-loops - EAP-TLS and RadSec stop working too, not just PAP. If you
-enable `PAP_ENABLED`, actually test the LDAP connection works before
-relying on this in production; if the container is crash-looping, checking
-`docker inspect <container> --format='{{.RestartCount}}'` confirms it (a
-climbing count means it's looping, not just slow to start).
 
 ## Updating
 
