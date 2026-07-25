@@ -299,6 +299,33 @@ Independent of which PKI path you used above — pick how
 cert. Paths A and B are mutually exclusive (toggled by `GRAPH_ENABLED`);
 Path C (guest Wi-Fi) is additive and works alongside either.
 
+### Policy tiers and VLANs
+
+Whichever path you pick, every EAP-TLS decision is one of three tiers, each
+a `policy.json` rule's `tier` value (see the examples under each path
+below):
+
+- **`access`** — fully trusted network. `HTTP 200` from `/check`.
+- **`untrust`** — a *known* device/identity that failed the compliance
+  check (non-compliant Intune device, disabled AD account you've chosen to
+  route here instead of rejecting outright, etc.) — meant for a
+  quarantine/remediation VLAN with restricted access, not full lockout.
+  `HTTP 403` from `/check` (same status as `reject` — FreeRADIUS
+  distinguishes them via the response body's `tier` field, not the HTTP
+  status; see intune-radius-helper's README for why).
+- **`reject`** — no network access at all. `HTTP 403`.
+
+`tier` only decides *what kind* of outcome this is — it's `check-policy.sh`
+in `post-auth` that actually maps `access`/`untrust` to a real VLAN, per
+site and per medium (wifi/wired), via `VLAN_ACCESS_WIFI_<SITE>` /
+`VLAN_UNTRUST_WIFI_<SITE>` / their `_WIRED_` counterparts. **An `untrust`
+tier with no VLAN configured for that site+medium rejects outright** rather
+than silently falling back to "no VLAN" — see "Sites, RADIUS clients... and
+VLAN assignment" below for the full mapping rules and the per-site env
+vars. If you never intend to use the `untrust` tier at all, just don't
+write any policy rule that produces it (all three example policies below
+default to `access`/`reject` only unless you explicitly add one).
+
 ### Path A: AD/LDAP only (no Intune/Entra)
 
 For deployments with no Intune/Entra tenant involved at all — device certs
@@ -330,7 +357,28 @@ curl -o config/policy.json \
 ```
 
 Edit it to taste; as shipped it grants `access` when `ad_device_found` and
-`ad_device_enabled` are both true, and rejects otherwise.
+`ad_device_enabled` are both true, and rejects otherwise — no `untrust`
+tier by default, since plain AD/LDAP lookups don't carry a compliance
+dimension the way Intune does (see "Policy tiers and VLANs" above), just a
+found/enabled boolean.
+
+If you'd rather route a *known-but-disabled* AD computer account to a
+quarantine VLAN instead of an outright reject, change its rule's `tier`:
+
+```json
+{
+  "name": "ad-device-disabled-untrust",
+  "when": {"field": "ad_device_enabled", "op": "eq", "value": false},
+  "tier": "untrust",
+  "reason": "AD computer account disabled"
+}
+```
+
+(replacing the shipped `ad-device-disabled-reject` rule) — this mirrors the
+Intune "known but non-compliant" pattern in Path B below, just keyed off
+`ad_device_enabled` instead of `compliance_state`. Requires
+`VLAN_UNTRUST_WIFI_<SITE>`/`VLAN_UNTRUST_WIRED_<SITE>` to actually be
+configured for the relevant site(s), or it fails closed to `reject` anyway.
 
 ### Path B: Intune/Entra device compliance
 
@@ -364,6 +412,26 @@ TENANT_ID=...
 CLIENT_ID=...
 CLIENT_SECRET=...
 ```
+
+**This is the one path with a built-in `untrust` tier by default** — a
+device Intune has actually enrolled, but that isn't (`compliant` *and*
+synced within the last 72h), falls through to:
+
+```json
+{
+  "name": "known-noncompliant-device-untrust",
+  "when": {"field": "device_found", "op": "eq", "value": true},
+  "tier": "untrust",
+  "reason": "device enrolled but not compliant"
+}
+```
+
+— landing it on `VLAN_UNTRUST_WIFI_<SITE>`/`VLAN_UNTRUST_WIRED_<SITE>`
+(see "Policy tiers and VLANs" above) instead of a hard reject, so a device
+that's merely fallen out of compliance (stale sync, pending update) gets a
+restricted network rather than total lockout. A device Intune has never
+heard of at all (`device_found: false`) still falls through to
+`defaultTier: reject` — `untrust` is specifically for *known* devices.
 
 Optional: copy the default ruleset locally to customize it instead of
 relying on the built-in one:
