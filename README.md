@@ -453,6 +453,25 @@ independently enforced (a correct password for a non-member still rejects),
 and the real generated `sAMAccountName=` search filter executes correctly
 against a live LDAP server.
 
+**`PAP_LDAP_VERIFY_CERT=true` needs your AD's own CA trusted, which this
+stack doesn't currently have a way to supply.** There's no `ca_file`/`ca_path`
+equivalent wired up for this connection - your AD's PKI (whatever issues your
+DC's LDAPS cert) is almost certainly not the same one used for EAP-TLS
+(`certs/ca-chain.pem`), so verification will only succeed if the DC's cert
+chains to something already in the container's default system trust store.
+Otherwise, leave this `false` - the connection is still TLS-encrypted, just
+without authenticating the DC's identity.
+
+**A broken LDAP connection takes down the whole RADIUS server, not just
+guest Wi-Fi.** Found this against production: if the `ldap` module can't
+connect at startup (bad server address, cert verification failure, network
+unreachable), FreeRADIUS treats that as fatal and the *entire* container
+crash-loops - EAP-TLS and RadSec stop working too, not just PAP. If you
+enable `PAP_ENABLED`, actually test the LDAP connection works before
+relying on this in production; if the container is crash-looping, checking
+`docker inspect <container> --format='{{.RestartCount}}'` confirms it (a
+climbing count means it's looping, not just slow to start).
+
 ## Updating
 
 Pull the latest upstream FreeRADIUS and helper images with:
