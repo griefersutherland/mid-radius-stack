@@ -408,6 +408,32 @@ PAP_LDAP_GROUP_DN=CN=WifiGuests,OU=Groups,DC=example,DC=com
 VLAN_PAP_WIFI_BOSTON=50   # per-site, same pattern as VLAN_ACCESS_WIFI_<SITE>
 ```
 
+**Reading/finding a DN:** a distinguished name is read right-to-left - each
+`DC=` is a level of your domain name (`t0.pac3.net` becomes
+`DC=t0,DC=pac3,DC=net`), each `OU=` is one level of organizational unit
+nesting (outermost last), and the leftmost component (`CN=` for a user or
+group, sometimes `OU=` for a container) is the object itself. A user or
+group nested several OUs deep looks like this - note the OUs read from
+innermost to outermost:
+
+```
+PAP_LDAP_BASE_DN=OU=users,OU=t0.pac3.net,DC=t0,DC=pac3,DC=net
+PAP_LDAP_GROUP_DN=CN=WiFi Users,OU=security,OU=groups,OU=t0.pac3.net,DC=t0,DC=pac3,DC=net
+```
+
+(a group named "WiFi Users" inside `groups/security`, inside a `t0.pac3.net`
+OU, in the `t0.pac3.net` domain.) `PAP_LDAP_BASE_DN` only needs to be high
+enough in the tree to contain every user who might authenticate - it doesn't
+need to be the exact OU a given user lives in, since the search filter
+finds them by `sAMAccountName` underneath it.
+
+The easiest way to get the exact value for your environment: in **Active
+Directory Users and Computers**, enable **View → Advanced Features**, then
+right-click the user/group → **Properties → Attribute Editor** tab →
+`distinguishedName`. Or from PowerShell:
+`Get-ADUser <username> -Properties DistinguishedName` /
+`Get-ADGroup <groupname> -Properties DistinguishedName`.
+
 **Why this is deliberately separate from the rest of this stack:** guests
 have no certificate and no Entra device identity, so there's nothing for
 `intune-radius-helper` to check - a guest request never calls
