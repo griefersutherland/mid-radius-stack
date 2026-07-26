@@ -51,6 +51,12 @@ set_secret() {
 echo "Generating local secrets in .env..."
 set_secret POSTGRES_PASSWORD
 set_secret REDIS_PASSWORD
+# Gates device blocking (POST /block-device etc.) and the helper's
+# /debug/ad-device, /debug/jamf-device endpoints - see intune-radius-helper's
+# README "Device blocking" section. Left blank, those all fail closed rather
+# than accept unauthenticated access, so there's no harm generating it even
+# if you don't end up using those endpoints.
+set_secret ADMIN_API_KEY
 
 # Sites are user-defined (uncomment/add NAS_CIDR_<SITE> in .env yourself
 # first - see .env.example) - this discovers whatever sites are already
