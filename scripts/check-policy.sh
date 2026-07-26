@@ -39,6 +39,9 @@ SANITIZED_MAC="$(printf '%s' "$CALLING_STATION_ID" | tr -cd 'A-Fa-f0-9' | tr 'A-
 CERT_FILE="$CERT_STAGE_DIR/${SANITIZED_MAC}.pem"
 [ -f "$CERT_FILE" ] || fail_closed
 
+CORRELATION_ID_FILE="$CERT_STAGE_DIR/${SANITIZED_MAC}.correlation_id"
+CORRELATION_ID="$(cat "$CORRELATION_ID_FILE" 2>/dev/null || true)"
+
 # RADIUS_USERNAME/CALLING_STATION_ID are passed via the environment (ENVIRON[]),
 # not `awk -v` - awk's `-v var=value` assignments undergo their own escape-sequence
 # interpretation (implementation-defined for sequences awk doesn't recognize,
@@ -46,7 +49,7 @@ CERT_FILE="$CERT_STAGE_DIR/${SANITIZED_MAC}.pem"
 # through), which is exactly the kind of surprise this needs to avoid when the
 # value can contain arbitrary characters (a Windows supplicant sending
 # `DOMAIN\user` as User-Name will otherwise break the JSON here).
-REQUEST_JSON="$(RADIUS_USERNAME="$RADIUS_USERNAME" CALLING_STATION_ID="$CALLING_STATION_ID" awk '
+REQUEST_JSON="$(RADIUS_USERNAME="$RADIUS_USERNAME" CALLING_STATION_ID="$CALLING_STATION_ID" CORRELATION_ID="$CORRELATION_ID" awk '
 function jsonescape(s) {
   # gsub replacement text has its own backslash handling too: a
   # single escaped backslash in the replacement is a no-op (it means
@@ -65,7 +68,8 @@ BEGIN { printf("{"); printf("\"cert_pem\":\"") }
 END {
   printf("\",")
   printf("\"radius_username\":\"%s\",", jsonescape(ENVIRON["RADIUS_USERNAME"]))
-  printf("\"calling_station_id\":\"%s\"", jsonescape(ENVIRON["CALLING_STATION_ID"]))
+  printf("\"calling_station_id\":\"%s\",", jsonescape(ENVIRON["CALLING_STATION_ID"]))
+  printf("\"correlation_id\":\"%s\"", jsonescape(ENVIRON["CORRELATION_ID"]))
   printf("}")
 }
 ' "$CERT_FILE")"
@@ -73,7 +77,7 @@ END {
 RESPONSE="$(curl -sS --max-time 8 -X POST -H "Content-Type: application/json" \
   --data "$REQUEST_JSON" "$HELPER_URL" 2>/dev/null)"
 
-rm -f "$CERT_FILE"
+rm -f "$CERT_FILE" "$CORRELATION_ID_FILE"
 
 TIER="$(printf '%s' "$RESPONSE" | grep -oE '"tier"[[:space:]]*:[[:space:]]*"[a-z]+"' | sed -E 's/.*"([a-z]+)"$/\1/')"
 

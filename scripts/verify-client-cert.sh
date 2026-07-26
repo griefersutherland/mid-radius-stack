@@ -32,17 +32,26 @@ CALLING_STATION_ID="${3:-}"
 
 LOG="/logs/radius-verify.log"
 
+# One ID per auth attempt, threaded through this log, staged for
+# check-policy.sh to pick up (see below), and from there into the helper's
+# /check request and its own intune-auth.log/auth_events entry - so a single
+# auth attempt can be grep'd/queried end-to-end across all three instead of
+# manually matching MAC + rough timestamp, which gets ambiguous fast during
+# retry storms (confirmed the hard way debugging this stack).
+CORRELATION_ID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null)"
+[ -n "$CORRELATION_ID" ] || CORRELATION_ID="$(date +%s%N)-$$"
+
 fail() {
-  echo "$(date -Iseconds) FAIL: $*" >> "$LOG"
+  echo "$(date -Iseconds) [${CORRELATION_ID}] FAIL: $*" >> "$LOG"
   exit 1
 }
 
 passlog() {
-  echo "$(date -Iseconds) PASS: $*" >> "$LOG"
+  echo "$(date -Iseconds) [${CORRELATION_ID}] PASS: $*" >> "$LOG"
 }
 
 echo "============================================================" >> "$LOG"
-echo "$(date -Iseconds) verify start cert=${CERT} username=${RADIUS_USERNAME} callingStationId=${CALLING_STATION_ID}" >> "$LOG"
+echo "$(date -Iseconds) [${CORRELATION_ID}] verify start cert=${CERT} username=${RADIUS_USERNAME} callingStationId=${CALLING_STATION_ID}" >> "$LOG"
 
 [ -n "$CERT" ] || fail "missing cert path"
 [ -f "$CERT" ] || fail "cert file does not exist: $CERT"
@@ -88,6 +97,7 @@ fi
 
 mkdir -p "$CERT_STAGE_DIR"
 cp "$CERT" "$CERT_STAGE_DIR/${SANITIZED_MAC}.pem"
+printf '%s' "$CORRELATION_ID" > "$CERT_STAGE_DIR/${SANITIZED_MAC}.correlation_id"
 
 passlog "certificate structurally valid, staged for policy check as ${SANITIZED_MAC}.pem"
 exit 0
