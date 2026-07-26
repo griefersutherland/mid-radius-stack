@@ -1,3 +1,9 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -17,6 +23,7 @@ services:
       retries: 10
     networks:
       - internal
+    logging: *default-logging
 
   redis:
     image: redis:7-alpine
@@ -36,6 +43,7 @@ services:
       retries: 10
     networks:
       - internal
+    logging: *default-logging
 
   intune-radius-helper:
     image: ghcr.io/griefersutherland/intune-radius-helper:latest
@@ -53,6 +61,7 @@ services:
       - ./config:/config:ro
     networks:
       - internal
+    logging: *default-logging
 
   freeradius:
     image: freeradius/freeradius-server:latest
@@ -83,6 +92,7 @@ services:
       - ./logs:/logs
     networks:
       - internal
+    logging: *default-logging
 
 networks:
   internal:

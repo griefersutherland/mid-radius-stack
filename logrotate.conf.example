@@ -1,0 +1,30 @@
+# Rotates the app-level log files this stack writes directly to ./logs -
+# radius-verify.log (verify-client-cert.sh) and intune-auth.log
+# (intune-radius-helper). These are separate from container stdout/stderr
+# (already capped via docker-compose.yaml's per-service `logging:` limits) -
+# this file only covers what's written straight to the bind-mounted ./logs
+# volume, which Docker's own log driver never sees.
+#
+# Install: copy to /etc/logrotate.d/mid-radius-stack, replacing
+# /path/to/mid-radius-stack below with wherever you actually cloned this
+# repo. logrotate itself is normally already installed and run daily via
+# cron/systemd timer on most distros - nothing else to set up.
+#
+# copytruncate is required, not optional: these files are opened, appended
+# to, and closed on every single write (not held open for the life of the
+# process), so a plain rename-based rotation would just have the next write
+# silently recreate the original filename - copytruncate truncates the
+# existing file in place instead, which these processes handle correctly.
+#
+# 14 days is a starting point, not a compliance requirement - adjust `rotate`
+# to whatever retention window you actually need.
+
+/path/to/mid-radius-stack/logs/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

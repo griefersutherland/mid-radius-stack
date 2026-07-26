@@ -885,6 +885,27 @@ docker compose up -d --force-recreate freeradius
 already recreates the container as needed - this only matters for changes
 that touch *just* the bind-mounted script files.)
 
+## Log management
+
+Two separate things can grow unbounded here, and need two separate fixes:
+
+- **Container stdout/stderr** (step-ca-equivalent request logs, uvicorn
+  access logs, etc.) - capped via each service's `logging:` block in
+  `docker-compose.yaml` (Docker's `json-file` driver, `max-size`/`max-file`).
+  Already configured; nothing to install.
+- **App-level files this stack writes directly to `./logs`** -
+  `radius-verify.log` (from `verify-client-cert.sh`) and `intune-auth.log`
+  (from `intune-radius-helper`) bypass Docker's log driver entirely, since
+  they're written straight to the bind-mounted volume, not to stdout. These
+  need host-level `logrotate`, not a Docker setting - copy
+  [`logrotate.conf.example`](logrotate.conf.example) to
+  `/etc/logrotate.d/mid-radius-stack`, fix the path inside it, done
+  (logrotate itself is normally already installed and cron/systemd-timer
+  driven on most distros).
+
+14-day retention in the example is a starting point, not a requirement -
+adjust `rotate` in the logrotate config to whatever window you actually need.
+
 ## License
 
 GPLv3 or later. See [LICENSE](LICENSE).
