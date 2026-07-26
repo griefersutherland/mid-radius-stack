@@ -70,6 +70,8 @@ echo "$TEXT" | grep -A3 "X509v3 Extended Key Usage" | grep -q "TLS Web Client Au
 echo "$TEXT" | grep -q "URI:${URN_PREFIX}:entra-device-id:" || \
 echo "$TEXT" | grep -q "URI:${URN_PREFIX}:entra-user-id:" || \
 echo "$TEXT" | grep -q "URI:${URN_PREFIX}:user-upn:" || \
+echo "$TEXT" | grep -q "URI:${URN_PREFIX}:onprem-sid:" || \
+echo "$TEXT" | grep -q "URI:${URN_PREFIX}:jamf-serial:" || \
 fail "missing expected ${URN_PREFIX} SAN URI"
 
 # Stage the cert PEM for the policy check, which now happens in post-auth

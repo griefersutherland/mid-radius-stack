@@ -65,7 +65,14 @@ match freely:
 |---|---|
 | On-prem AD/LDAP only — no Intune/Entra tenant involved | [Authentication → Path A](#path-a-adldap-only-no-intuneentra) |
 | Live Intune device compliance + Entra account status | [Authentication → Path B](#path-b-intuneentra-device-compliance) |
-| Either of the above, *plus* username/password guests | [Authentication → Path C](#path-c-add-guest-wi-fi-pap-against-ad) |
+| Jamf Pro Smart Group membership (macOS, no Intune involved) | [Authentication → Path D](#path-d-jamf-pro-device-compliance-macos) |
+| Any/all of the above, *plus* username/password guests | [Authentication → Path C](#path-c-add-guest-wi-fi-pap-against-ad) |
+
+Paths A, B, and D are independent, per-device-type checks evaluated by the
+same policy engine — a fleet with Windows/Intune, AD-domain, and Jamf-managed
+Mac devices can enable all three at once (each cert only carries the SAN
+URI(s) relevant to how it was issued, so the helper only ever populates the
+facts for whichever path that cert matches).
 
 Every combination of one PKI path + one auth path (plus optionally guest
 Wi-Fi on top) is a supported configuration — they don't constrain each
@@ -93,6 +100,7 @@ Regardless of which PKI path you use, mid-radius-stack expects:
   | URI | `urn:example.com:entra-device-id:{{AAD_Device_ID}}` | Authentication → Path B (Intune/Entra) |
   | URI | `urn:example.com:user-upn:{{UPN}}` | Authentication → Path B, user (not device) certs |
   | URI | `urn:example.com:onprem-sid:{{OnPremisesSecurityIdentifier}}` | Authentication → Path A (AD/LDAP-only); optional secondary check under Path B |
+  | URI | `urn:example.com:jamf-serial:{{SERIALNUMBER}}` | Authentication → Path D (Jamf Pro, macOS) |
 
   (swap `urn:example.com` for your actual `URN_PREFIX`.) If certs are
   issued through Intune SCEP, all of these are added the same way — in the
@@ -457,7 +465,67 @@ explicit denylist (`ADMIN_API_KEY`, see `.env.example`) lets you cut off a
 stolen/terminated device immediately — see intune-radius-helper's README
 "Device blocking" section for the `/block-device`/`/unblock-device`/
 `/blocked-devices` API. Works the same regardless of which Authentication
-path (A or B) you're on.
+path (A, B, or D) you're on.
+
+### Path D: Jamf Pro device compliance (macOS)
+
+For Jamf-managed devices (typically macOS) that aren't Intune-enrolled —
+device certs are checked against a Jamf Pro Smart Group, keyed off the
+cert's `jamf-serial` SAN URI (from "Certificate requirements" above).
+Independent of Paths A/B — enable it alongside either, or on its own if
+Jamf is your only fleet.
+
+Jamf Pro has no single "compliant" field the way Intune does, so this
+requires defining your own Smart Group in Jamf Pro (e.g. built from Smart
+Group criteria like FileVault status, OS version, or a compliance Extension
+Attribute) and pointing `JAMF_COMPLIANT_GROUP_ID` at it — the group's
+numeric ID, visible in its URL in the Jamf Pro console.
+
+1. **Jamf Pro → Settings → System → API roles and clients → New.** Give the
+   API Client read access to computer inventory and group memberships, note
+   the **Client ID** and generate a **Client Secret** — these go in `.env`
+   as `JAMF_API_CLIENT_ID` and `JAMF_API_CLIENT_SECRET`.
+2. Note your Jamf Pro instance URL (e.g. `https://yourorg.jamfcloud.com`) —
+   goes in `.env` as `JAMF_API_URL`.
+3. Build (or reuse) a Smart Group representing "compliant" in your org's own
+   terms, and note its numeric ID from its URL in the Jamf Pro console.
+
+```
+JAMF_ENABLED=true
+JAMF_API_URL=https://yourorg.jamfcloud.com
+JAMF_API_CLIENT_ID=...
+JAMF_API_CLIENT_SECRET=...
+JAMF_COMPLIANT_GROUP_ID=42
+```
+
+If certs come from [pimptune-stack](https://github.com/griefersutherland/pimptune-stack)'s
+Jamf SCEP provisioner, add the `jamf-serial` SAN URI in that same Jamf SCEP
+profile's Subject Alternative Name section (see that repo's README "Jamf Pro
+configuration").
+
+**A custom policy is required** — the built-in default ruleset only
+understands Intune/Entra facts and fails closed (rejects everything)
+without one:
+
+```bash
+mkdir -p config
+curl -o config/policy.json \
+  https://raw.githubusercontent.com/griefersutherland/intune-radius-helper/main/policy.jamf.example.json
+```
+
+As shipped, it grants `access` for a device that's both actively managed and
+a member of the compliant Smart Group; a known device that's fallen out of
+the group (or gone stale — no Jamf check-in in 72h) lands on `untrust`
+instead of an outright reject, mirroring Path B's "known but non-compliant"
+pattern. If you're running Paths A/B/D together, merge the rules from
+`policy.example.json` / `policy.ad-only.example.json` / `policy.jamf.example.json`
+into one `policy.json` instead of picking just one — each rule only matches
+the facts populated for its own path's cert type, so they don't interfere
+with each other.
+
+See intune-radius-helper's README "Jamf Pro device lookup" section for the
+full fact reference, and its `/debug/jamf-device` endpoint for testing Jamf
+Pro API connectivity in isolation.
 
 ### Path C: Add guest Wi-Fi (PAP against AD)
 
