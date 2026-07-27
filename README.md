@@ -632,15 +632,21 @@ chains to something already in the container's default system trust store.
 Otherwise, leave this `false` - the connection is still TLS-encrypted, just
 without authenticating the DC's identity.
 
-**A broken LDAP connection takes down the whole RADIUS server, not just
-guest Wi-Fi.** Found this against production: if the `ldap` module can't
-connect at startup (bad server address, cert verification failure, network
-unreachable), FreeRADIUS treats that as fatal and the *entire* container
-crash-loops - EAP-TLS and RadSec stop working too, not just PAP. If you
-enable `PAP_ENABLED`, actually test the LDAP connection works before
-relying on this in production; if the container is crash-looping, checking
-`docker inspect <container> --format='{{.RestartCount}}'` confirms it (a
-climbing count means it's looping, not just slow to start).
+**A broken LDAP connection used to take down the whole RADIUS server, not
+just guest Wi-Fi - fixed now.** Found this against production: `rlm_ldap`'s
+default connection pool opens a connection eagerly during module
+instantiation, and per FreeRADIUS's own docs, if that fails (bad server
+address, cert verification failure, network unreachable, LDAP just being
+down when the container starts) the module instantiation is treated as
+fatal - the *entire* container crash-loops, taking EAP-TLS and RadSec down
+too, not just PAP. Fixed by setting `pool { start = 0 }` on the `ldap`
+module (see `scripts/start-radius.sh`), which defers connecting until the
+first actual PAP request instead of doing it eagerly at startup - an LDAP
+outage now shows up as a per-request reject (logged by `rlm_ldap` as a
+normal module error, visible via `docker compose logs freeradius`) rather
+than a server-wide crash. Still worth actually testing the LDAP connection
+once before relying on `PAP_ENABLED` in production, just not because of
+crash-loop risk anymore.
 
 ## Setup
 

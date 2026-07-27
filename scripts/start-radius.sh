@@ -477,6 +477,34 @@ ldap {
         require_cert = '${PAP_LDAP_REQUIRE_CERT}'
     }
 
+    # net_timeout bounds the initial TCP connect specifically (maps to
+    # LDAP_OPT_NETWORK_TIMEOUT) - separate from res_timeout/srv_timelimit,
+    # which only apply once a connection already exists. Without this set
+    # explicitly, measured a 90+ second hang per PAP request against an
+    # unreachable server (a black-holed address never sends a TCP RST, so
+    # it rides out the OS's own SYN-retry timeout instead of anything
+    # LDAP-aware) - far too slow for a NAS/AP that's already given up and
+    # retried by then. 3s is a soft-fail budget, not a hard requirement -
+    # raise it if your LDAP server is typically slow to respond rather than
+    # actually down.
+    options {
+        net_timeout = 3
+    }
+
+    # start = 0 is load-bearing, not a tuning knob: rlm_ldap's default pool
+    # eagerly opens a connection during module instantiation, and per
+    # FreeRADIUS's own docs, "if the server cannot create specified number
+    # of connections during instantiation it will exit" - confirmed the
+    # hard way against production, this takes down EAP-TLS/RadSec too, not
+    # just guest PAP, since the whole radiusd process exits/restart-loops
+    # rather than just this module failing to load. With start = 0, the
+    # pool connects lazily on the first actual PAP request instead - an
+    # LDAP outage becomes a per-request reject (logged by rlm_ldap as a
+    # normal module error) instead of a server-wide crash loop.
+    pool {
+        start = 0
+    }
+
     user {
         base_dn = "\${..base_dn}"
         filter = "(sAMAccountName=%{%{Stripped-User-Name}:-%{User-Name}})"
