@@ -109,6 +109,14 @@ Regardless of which PKI path you use, mid-radius-stack expects:
   | URI | `urn:example.com:onprem-sid:{{OnPremisesSecurityIdentifier}}` | Authentication → Path A (AD/LDAP-only); optional secondary check under Path B |
   | URI | `urn:example.com:jamf-serial:{{SERIALNUMBER}}` | Authentication → Path D (Jamf Pro, macOS) |
 
+  **The `onprem-sid` URI isn't required if certs come straight from ADCS
+  with strong certificate mapping enabled** (required since KB5014754) -
+  those already carry the objectSid natively as the `1.3.6.1.4.1.311.25.2`
+  extension, which `verify-client-cert.sh`'s SAN-URI gate and
+  intune-radius-helper's identity extraction both recognize directly, no
+  custom URI needed. Only add the URI by hand for PKI paths that don't
+  emit this extension on their own (e.g. `pimptune-stack`'s step-ca).
+
   (swap `urn:example.com` for your actual `URN_PREFIX`.) If certs are
   issued through Intune SCEP, all of these are added the same way — in the
   SCEP profile's **Subject Alternative Name** section — regardless of which

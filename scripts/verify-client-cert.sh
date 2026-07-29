@@ -81,7 +81,8 @@ echo "$TEXT" | grep -q "URI:${URN_PREFIX}:entra-user-id:" || \
 echo "$TEXT" | grep -q "URI:${URN_PREFIX}:user-upn:" || \
 echo "$TEXT" | grep -q "URI:${URN_PREFIX}:onprem-sid:" || \
 echo "$TEXT" | grep -q "URI:${URN_PREFIX}:jamf-serial:" || \
-fail "missing expected ${URN_PREFIX} SAN URI"
+echo "$TEXT" | grep -qE "1\.3\.6\.1\.4\.1\.311\.25\.2:|Microsoft NTDS CA Extension" || \
+fail "missing expected ${URN_PREFIX} SAN URI or ADCS strong-mapping SID extension"
 
 # Stage the cert PEM for the policy check, which now happens in post-auth
 # via check-policy.sh (see start-radius.sh) - this hook can no longer hand
