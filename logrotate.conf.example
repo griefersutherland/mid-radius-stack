@@ -1,6 +1,6 @@
 # Rotates the app-level log files this stack writes directly to ./logs -
 # radius-verify.log (verify-client-cert.sh) and intune-auth.log
-# (intune-radius-helper). These are separate from container stdout/stderr
+# (mid-radius-helper). These are separate from container stdout/stderr
 # (already capped via docker-compose.yaml's per-service `logging:` limits) -
 # this file only covers what's written straight to the bind-mounted ./logs
 # volume, which Docker's own log driver never sees.

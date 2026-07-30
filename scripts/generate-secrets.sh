@@ -52,7 +52,7 @@ echo "Generating local secrets in .env..."
 set_secret POSTGRES_PASSWORD
 set_secret REDIS_PASSWORD
 # Gates device blocking (POST /block-device etc.) and the helper's
-# /debug/ad-device, /debug/jamf-device endpoints - see intune-radius-helper's
+# /debug/ad-device, /debug/jamf-device endpoints - see mid-radius-helper's
 # README "Device blocking" section. Left blank, those all fail closed rather
 # than accept unauthenticated access, so there's no harm generating it even
 # if you don't end up using those endpoints.

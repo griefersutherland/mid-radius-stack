@@ -22,7 +22,7 @@ FREERADIUS_DEBUG="${FREERADIUS_DEBUG:-true}"
 
 EXPECTED_ISSUER_CN="${EXPECTED_ISSUER_CN:?EXPECTED_ISSUER_CN env var is required (issuing CA's CN)}"
 URN_PREFIX="${URN_PREFIX:-urn:example.com}"
-HELPER_URL="${HELPER_URL:-http://intune-radius-helper:8080/check}"
+HELPER_URL="${HELPER_URL:-http://mid-radius-helper:8080/check}"
 CERT_STAGE_DIR="${CERT_STAGE_DIR:-/var/run/freeradius/cert-stage}"
 
 # RadSec (RFC 6614 - RADIUS over TLS, RFC 6613 transport). Reuses the same
@@ -76,7 +76,7 @@ if is_true "$RADSEC_ENABLED"; then
 fi
 
 # Guest Wi-Fi via EAP-TTLS/PAP, validated by an LDAP bind-as-user against AD
-# - deliberately NOT routed through intune-radius-helper at all, since guests
+# - deliberately NOT routed through mid-radius-helper at all, since guests
 # have no cert and no Entra device identity for it to check. Confirmed
 # against a real container (OpenLDAP standing in for AD): a bind succeeds
 # only with the correct password AND only for members of PAP_LDAP_GROUP_DN -

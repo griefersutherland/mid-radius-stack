@@ -45,8 +45,8 @@ services:
       - internal
     logging: *default-logging
 
-  intune-radius-helper:
-    image: ghcr.io/griefersutherland/intune-radius-helper:latest
+  mid-radius-helper:
+    image: ghcr.io/griefersutherland/mid-radius-helper:latest
     restart: unless-stopped
     env_file:
       - .env
@@ -77,7 +77,7 @@ services:
     env_file:
       - .env
     depends_on:
-      - intune-radius-helper
+      - mid-radius-helper
     ports:
       - "1812:1812/udp"
       - "1813:1813/udp"

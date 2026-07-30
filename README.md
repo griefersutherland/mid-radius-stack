@@ -18,9 +18,9 @@ A docker-compose stack wiring together EAP-TLS FreeRADIUS with a
 certificate-identity compliance gate, backed by Postgres + Redis caching.
 
 - **freeradius** — the stock [`freeradius/freeradius-server`](https://hub.docker.com/r/freeradius/freeradius-server) image, unmodified. `scripts/start-radius.sh` and `scripts/verify-client-cert.sh` (GPLv3, in this repo) are bind-mounted in and installed as the container's entrypoint — no custom image to build or publish.
-- [intune-radius-helper](https://github.com/griefersutherland/intune-radius-helper) — pre-built image; FastAPI service that checks client cert identity against Intune/Entra (via Microsoft Graph) and/or on-prem AD (via LDAPS), depending on how you configure it — see "Authentication configuration" below.
+- [mid-radius-helper](https://github.com/griefersutherland/mid-radius-helper) — pre-built image; FastAPI service that checks client cert identity against Intune/Entra (via Microsoft Graph), Jamf Pro, and/or on-prem AD (via LDAPS), depending on how you configure it — see "Authentication configuration" below.
 
-FreeRADIUS calls the helper over HTTP (`http://intune-radius-helper:8080/check`)
+FreeRADIUS calls the helper over HTTP (`http://mid-radius-helper:8080/check`)
 after the TLS handshake completes, from the RADIUS `post-auth` phase; the
 helper looks up the device/user identity embedded in the cert's SAN URIs
 against whichever backend(s) you've enabled (cached in Postgres, hot-cached
@@ -41,7 +41,7 @@ instead of by MAC + rough timestamp, which gets ambiguous during retries.
 via `%{exec:...}`, reads that staged cert (and correlation ID) back, calls
 the helper, and prints just the tier for `unlang` to `switch` on — assigning
 the matching VLAN (access/untrust, wifi/wired) or rejecting. See
-[intune-radius-helper](https://github.com/griefersutherland/intune-radius-helper)'s
+[mid-radius-helper](https://github.com/griefersutherland/mid-radius-helper)'s
 README "Correlating a single auth attempt across logs" section for how to
 actually use this ID once it reaches the helper. Both hooks get their config
 (`EXPECTED_ISSUER_CN`, `URN_PREFIX`, `HELPER_URL`, ...) from
@@ -113,7 +113,7 @@ Regardless of which PKI path you use, mid-radius-stack expects:
   with strong certificate mapping enabled** (required since KB5014754) -
   those already carry the objectSid natively as the `1.3.6.1.4.1.311.25.2`
   extension, which `verify-client-cert.sh`'s SAN-URI gate and
-  intune-radius-helper's identity extraction both recognize directly, no
+  mid-radius-helper's identity extraction both recognize directly, no
   custom URI needed. Only add the URI by hand for PKI paths that don't
   emit this extension on their own (e.g. `pimptune-stack`'s step-ca).
 
@@ -318,7 +318,7 @@ flag to force it.
 ## Authentication configuration
 
 Independent of which PKI path you used above — pick how
-`intune-radius-helper` decides `access`/`untrust`/`reject` for a presented
+`mid-radius-helper` decides `access`/`untrust`/`reject` for a presented
 cert. Paths A and B are mutually exclusive (toggled by `GRAPH_ENABLED`);
 Path C (guest Wi-Fi) is additive and works alongside either.
 
@@ -335,7 +335,7 @@ below):
   quarantine/remediation VLAN with restricted access, not full lockout.
   `HTTP 403` from `/check` (same status as `reject` — FreeRADIUS
   distinguishes them via the response body's `tier` field, not the HTTP
-  status; see intune-radius-helper's README for why).
+  status; see mid-radius-helper's README for why).
 - **`reject`** — no network access at all. `HTTP 403`.
 
 `tier` only decides *what kind* of outcome this is — it's `check-policy.sh`
@@ -366,7 +366,7 @@ AD_LDAP_BIND_PASSWORD=...
 
 `TENANT_ID`/`CLIENT_ID`/`CLIENT_SECRET` can stay blank — no Entra app
 registration needed, and Graph is never called (see
-[intune-radius-helper's README](https://github.com/griefersutherland/intune-radius-helper#ad-only-mode-no-graph-app-registration)
+[mid-radius-helper's README](https://github.com/griefersutherland/mid-radius-helper#ad-only-mode-no-graph-app-registration)
 "AD-only mode" section for exactly what this disables).
 
 **A custom policy is required** — the built-in default ruleset only
@@ -376,7 +376,7 @@ without one:
 ```bash
 mkdir -p config
 curl -o config/policy.json \
-  https://raw.githubusercontent.com/griefersutherland/intune-radius-helper/main/policy.ad-only.example.json
+  https://raw.githubusercontent.com/griefersutherland/mid-radius-helper/main/policy.ad-only.example.json
 ```
 
 Edit it to taste; as shipped it grants `access` when `ad_device_found` and
@@ -411,7 +411,7 @@ ID app registration (separate from pimptune's, if you're also using
 pimptune-stack for PKI — different app, different permissions):
 
 1. **Azure Portal → Microsoft Entra ID → App registrations → New registration.**
-   Name it (e.g. `intune-radius-helper`), leave account type as the
+   Name it (e.g. `mid-radius-helper`), leave account type as the
    default single-tenant, click **Register**.
 2. On the app's **Overview** page, note the **Application (client) ID** and
    **Directory (tenant) ID** — these go in `.env` as `CLIENT_ID` and
@@ -462,7 +462,7 @@ relying on the built-in one:
 ```bash
 mkdir -p config
 curl -o config/policy.json \
-  https://raw.githubusercontent.com/griefersutherland/intune-radius-helper/main/policy.example.json
+  https://raw.githubusercontent.com/griefersutherland/mid-radius-helper/main/policy.example.json
 ```
 
 **Optional: layer on-prem AD as an *additional* check** (not a replacement
@@ -471,13 +471,13 @@ curl -o config/policy.json \
 populates `ad_device_found`/`ad_device_enabled` alongside the Intune/Entra
 facts, but **changes no decision by itself** — you have to reference those
 fields in a custom `policy.json` rule (e.g. reject if `ad_device_enabled`
-is `false`) for it to matter. See intune-radius-helper's README "On-prem AD
+is `false`) for it to matter. See mid-radius-helper's README "On-prem AD
 device lookup" section for the full fact reference and an example rule, and
 its `/debug/ad-device` endpoint for testing LDAP connectivity in isolation.
 
 **Device blocking**: independent of either compliance check above, an
 explicit denylist (`ADMIN_API_KEY`, see `.env.example`) lets you cut off a
-stolen/terminated device immediately — see intune-radius-helper's README
+stolen/terminated device immediately — see mid-radius-helper's README
 "Device blocking" section for the `/block-device`/`/unblock-device`/
 `/blocked-devices` API. Works the same regardless of which Authentication
 path (A, B, or D) you're on.
@@ -518,29 +518,21 @@ Jamf SCEP provisioner, add the `jamf-serial` SAN URI in that same Jamf SCEP
 profile's Subject Alternative Name section (see that repo's README "Jamf Pro
 configuration").
 
-**A custom policy is required** — the built-in default ruleset only
-understands Intune/Entra facts and fails closed (rejects everything)
-without one:
+**No custom policy needed for the standard case** — the built-in default
+ruleset normalizes Intune, Jamf, and (as of the ADCS strong-mapping support
+above) AD facts into shared `identity_found`/`compliant`/`account_enabled`
+facts, so a device that's actively managed and a member of the compliant
+Smart Group gets `access` out of the box; a known device that's fallen out
+of the group (or gone stale) lands on `untrust` instead of an outright
+reject. Only write a `policy.json` if you need to diverge from that (e.g.
+different staleness thresholds per platform) - copy
+[`policy.example.json`](https://raw.githubusercontent.com/griefersutherland/mid-radius-helper/main/policy.example.json)
+as a starting point, since it documents the same normalized facts the
+built-in default uses.
 
-```bash
-mkdir -p config
-curl -o config/policy.json \
-  https://raw.githubusercontent.com/griefersutherland/intune-radius-helper/main/policy.jamf.example.json
-```
-
-As shipped, it grants `access` for a device that's both actively managed and
-a member of the compliant Smart Group; a known device that's fallen out of
-the group (or gone stale — no Jamf check-in in 72h) lands on `untrust`
-instead of an outright reject, mirroring Path B's "known but non-compliant"
-pattern. If you're running Paths A/B/D together, merge the rules from
-`policy.example.json` / `policy.ad-only.example.json` / `policy.jamf.example.json`
-into one `policy.json` instead of picking just one — each rule only matches
-the facts populated for its own path's cert type, so they don't interfere
-with each other.
-
-See intune-radius-helper's README "Jamf Pro device lookup" section for the
-full fact reference, and its `/debug/jamf-device` endpoint for testing Jamf
-Pro API connectivity in isolation.
+See mid-radius-helper's README "Policy engine" and "Jamf Pro device lookup"
+sections for the full fact reference, and its `/debug/jamf-device` endpoint
+for testing Jamf Pro API connectivity in isolation.
 
 ### Path C: Add guest Wi-Fi (PAP against AD)
 
@@ -586,7 +578,7 @@ right-click the user/group → **Properties → Attribute Editor** tab →
 
 **Why this is deliberately separate from Path A/B above:** guests have no
 certificate and no device identity, so there's nothing for
-`intune-radius-helper` to check - a guest request never calls
+`mid-radius-helper` to check - a guest request never calls
 `check-policy.sh` or the helper at all. It's routed entirely by EAP type: in
 `post-auth`, `if (&EAP-Type == TTLS)` sends the request straight to a
 per-site guest VLAN (or rejects, if that site has no `VLAN_PAP_WIFI_<SITE>`
@@ -679,9 +671,9 @@ mkdir -p certs logs config
 docker compose up -d
 ```
 
-`docker compose logs -f freeradius` and `docker compose logs -f intune-radius-helper`
+`docker compose logs -f freeradius` and `docker compose logs -f mid-radius-helper`
 are your main debugging entry points; `curl http://localhost:8080/healthz`
-from inside the `intune-radius-helper` container reports cache/backend
+from inside the `mid-radius-helper` container reports cache/backend
 health, including which Authentication path is active (`graphEnabled`,
 `adLdapEnabled`).
 
@@ -715,7 +707,7 @@ CN → EKU → SAN URI all passed and the cert was staged successfully.
 `check-policy.sh` should print `access`, `untrust`, or `reject` — a real
 backend-driven answer (not stuck/empty) confirms the live lookup and policy
 engine are working end to end. Check `docker compose logs
-intune-radius-helper` for the exact reason behind an `untrust`/`reject`
+mid-radius-helper` for the exact reason behind an `untrust`/`reject`
 result.
 
 For a fully real end-to-end test (through FreeRADIUS's actual `post-auth`
@@ -916,7 +908,7 @@ Two separate things can grow unbounded here, and need two separate fixes:
   Already configured; nothing to install.
 - **App-level files this stack writes directly to `./logs`** -
   `radius-verify.log` (from `verify-client-cert.sh`) and `intune-auth.log`
-  (from `intune-radius-helper`) bypass Docker's log driver entirely, since
+  (from `mid-radius-helper`) bypass Docker's log driver entirely, since
   they're written straight to the bind-mounted volume, not to stdout. These
   need host-level `logrotate`, not a Docker setting - copy
   [`logrotate.conf.example`](logrotate.conf.example) to
